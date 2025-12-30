@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
@@ -16,10 +17,18 @@ logger = logging.getLogger("StageServer")
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # --- Models ---
 class ActorConfig(BaseModel):
     name: str
-    model_config: Dict[str, str]
+    llm_config: Dict[str, str]
     system_prompt: str
     memory: str = ""
 
@@ -81,7 +90,7 @@ class StageManager:
         self.performance_id = self.db.create_performance(script_id, self.world_bible)
         
         for name, cfg in self.actors.items():
-            m = cfg.model_config
+            m = cfg.llm_config
             self.llm_clients[name] = LLMProvider(m["api_key"], m["base_url"], m["model"])
             
             # Setup structured MemoryBank
@@ -202,8 +211,8 @@ class StageManager:
 
 manager = StageManager()
 
-@app.websocket("/ws/theater")
-async def ws_theater(websocket: WebSocket):
+@app.websocket("/ws/{room_id}")
+async def ws_theater(websocket: WebSocket, room_id: str):
     await manager.connect(websocket)
     try:
         while True:

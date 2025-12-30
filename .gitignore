@@ -1,0 +1,23 @@
+# Python Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+
+# Databases
+theater.db
+*.sqlite3
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project specific
+assets/logs/
+temp/
