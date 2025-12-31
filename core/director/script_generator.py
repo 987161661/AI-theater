@@ -2,7 +2,7 @@ import pandas as pd
 import json
 import re
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from openai import OpenAI
 
 from core.utils.json_parser import JSONParser, ScriptModel
@@ -110,6 +110,25 @@ class ScriptGenerator:
             df.at[0, "Selected"] = True
         return df
 
+    def generate_theme(self, genre: str, reality: str) -> str:
+        """
+        Generates a creative one-sentence script theme based on genre and reality.
+        """
+        prompt = (
+            f"请作为一个金牌编剧，根据以下设定，构思一个极具创意和张力的【剧本主题】（一句话）。\n"
+            f"【流派】: {genre}\n"
+            f"【世界观现实度】: {reality}\n\n"
+            "要求：\n"
+            "1. 只输出一句话，包含核心冲突。不要包含任何解释或开场白。\n"
+            "2. 语言要凝练、抓人、有画面感。\n"
+            "3. 主题要具体（例如：‘深海潜艇中的密室逃脱’ 而不是 ‘海底的冒险’）。"
+        )
+        response = self._query(prompt)
+        # Simple cleanup to remove quotes if LLM adds them
+        theme = response.strip().replace('"', '').replace('“', '').replace('”', '')
+        return theme
+
+
     def _query(self, prompt: str) -> str:
         """Helper to call LLM."""
         response = self._client.chat.completions.create(
@@ -118,3 +137,53 @@ class ScriptGenerator:
             temperature=0.8
         )
         return response.choices[0].message.content
+    
+    def adapt_script(self, history_summary: str, current_plan: Dict[str, str], theme: str, available_cast: List[str] = None) -> Dict[str, str]:
+        """
+        Adapts the next event based on the history of what actually happened.
+        STRICTLY enforces consistency: No new characters, no setting changes.
+        """
+        cast_str = ", ".join(available_cast) if available_cast else "Unknown"
+        
+        prompt = (
+            f"你需要作为一个【AI导演】，根据刚刚发生的剧情，动态调整接下来的剧本。\n"
+            f"【剧本主题】: {theme}\n"
+            f"【可用演员班底 (严禁新增/修改)】: {cast_str}\n"
+            f"【刚刚发生的剧情总结】: {history_summary}\n"
+            f"【原定接下来的剧情】: {current_plan}\n\n"
+            f"🔴 **核心约束 (必须遵守)**：\n"
+            f"1. **人物一致性**：绝对禁止引入新角色！绝对禁止修改现有角色的核心设定！必须使用【可用演员班底】中的人物。\n"
+            f"2. **人物弧光**：关注人物的内心变化和性格发展。根据上一幕的冲突，让人物自然地走向下一幕。\n"
+            f"3. **场景一致性**：严禁随意切换大的世界观或物理规则。\n"
+            f"4. **收敛性**：剧情必须向前推进，不能原地打转。\n\n"
+            f"任务：\n"
+            f"1. 分析‘刚刚发生的剧情’，判断是否需要调整下一幕。\n"
+            f"2. 细化或修改【原定剧情】，使其符合人物当下的心理状态。\n"
+            f"3. 输出修改后的 Time, Event, Goal。\n\n"
+            f"输出格式(JSON):\n"
+            f"```json\n"
+            f"{{\n"
+            f"  \"Time\": \"Day X HH:MM\",\n"
+            f"  \"Event\": \"一句话描述事件 (需包含 {cast_str} 中的角色)\",\n"
+            f"  \"Goal\": \"具体的收敛目标 (指导演员如何行动)\"\n"
+            f"}}\n"
+            f"```"
+        )
+        
+        response = self._query(prompt)
+        
+        # Simple extraction
+        from core.utils.json_parser import JSONParser
+        from pydantic import BaseModel
+        
+        class SingleEvent(BaseModel):
+            Time: str
+            Event: str
+            Goal: str
+        
+        event_data = JSONParser.parse(response, SingleEvent)
+        if event_data:
+            return event_data.model_dump()
+        
+        # Fallback if parsing fails - return original plan
+        return current_plan

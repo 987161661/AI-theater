@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 import json
 
 
-def render_websocket_chat(room_id: str = "consciousness_lab", ws_url: str = "ws://localhost:8001", member_count: int = 3, model_configs: list = None, scenario_config: dict = None, is_stage_view: bool = False):
+def render_websocket_chat(room_id: str = "consciousness_lab", ws_url: str = "ws://localhost:8001", member_count: int = 3, model_configs: list = None, scenario_config: dict = None, group_name: str = "语言模型内部意识讨论群", is_stage_view: bool = False):
     """
     渲染 WebSocket 实时群聊界面 - 使用与传统模式相同的微信精确 UI
     
@@ -19,6 +19,7 @@ def render_websocket_chat(room_id: str = "consciousness_lab", ws_url: str = "ws:
         member_count: 群成员数量
         model_configs: 模型配置列表 [{"model_name":..., "api_key":..., "base_url":..., "provider_name":...}]
         scenario_config: 剧本配置 {"enabled": bool, "events": list}
+        group_name: 群聊名称
     """
     
     full_ws_url = f"{ws_url}/ws/{room_id}"
@@ -619,7 +620,7 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
                     <div class="wc-chat-avatar">👥</div>
                     <div class="wc-chat-info">
                         <div class="wc-chat-row">
-                            <div class="wc-chat-name" id="sidebarGroupName">语言模型内部意识讨论群</div>
+                            <div class="wc-chat-name" id="sidebarGroupName">{group_name}</div>
                             <div class="wc-chat-time" id="lastTime">--:--</div>
                         </div>
                         <div class="wc-chat-preview" id="lastPreview">连接中...</div>
@@ -655,7 +656,7 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
             <div class="wc-chat-header">
                 <div class="wc-chat-title-container">
                     <div style="display:flex; flex-direction:column;">
-                        <div class="wc-chat-title" id="groupName" contenteditable="true" spellcheck="false" onblur="updateGroupName()">语言模型内部意识讨论群</div>
+                        <div class="wc-chat-title" id="groupName" contenteditable="true" spellcheck="false" onblur="updateGroupName()">{group_name}</div>
                         <div id="scenarioStatus" style="font-size:10px; color:#1890ff; display:none;"></div>
                     </div>
                     <span class="member-count" id="memberCountHeader">({member_count})</span>
@@ -693,6 +694,29 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
         </div>
     </div>
 </div>
+<div id="debugConsole" style="
+    position: fixed; 
+    bottom: 0; 
+    left: 0; 
+    width: 100%; 
+    height: 150px; 
+    background: rgba(0,0,0,0.8); 
+    color: #0f0; 
+    font-family: monospace; 
+    font-size: 12px; 
+    overflow-y: auto; 
+    z-index: 9999; 
+    padding: 10px;
+    box-sizing: border-box;
+    display: block; 
+    border-top: 2px solid #333;
+">
+    <div style="position:sticky; top:0; background:#000; border-bottom:1px solid #333; margin-bottom:5px; font-weight:bold;">
+        Debug Console (Auto-Scrolling)
+    </div>
+    <div id="debugLogs"></div>
+</div>
+</div>
 
 <script>
 const WS_URL = "{full_ws_url}";
@@ -706,13 +730,45 @@ let members = [
     {{ name: "Gaia", isUser: true, isThinking: false, lastThought: "", isManager: true, customPrompt: "" }}
 ]; 
 
+// --- DEBUG UTILS ---
+function log(msg, type='info') {{
+    const logs = document.getElementById("debugLogs");
+    if (!logs) return;
+    const entry = document.createElement("div");
+    entry.style.color = type === 'error' ? '#ff6b6b' : (type === 'success' ? '#69db7c' : '#0f0');
+    entry.textContent = `[${{new Date().toLocaleTimeString()}}] ${{msg}}`;
+    logs.appendChild(entry);
+    document.getElementById("debugConsole").scrollTop = document.getElementById("debugConsole").scrollHeight;
+    console.log(msg);
+}}
+
+window.onerror = function(msg, url, lineNo, columnNo, error) {{
+    log(`Runtime Error: ${{msg}} @ line ${{lineNo}}`, 'error');
+    return false;
+}};
+// ------------------- 
+
 function connect() {{
+    log("Attempting to connect to: " + WS_URL);
     renderMemberList(); 
-    ws = new WebSocket(WS_URL);
+    try {{
+        ws = new WebSocket(WS_URL);
+    }} catch(e) {{
+        log("WebSocket Creation Failed: " + e.message, 'error');
+        return;
+    }}
     
     ws.onopen = function() {{
+        log("WebSocket Connected!", 'success');
         isConnected = true;
         updateStatus();
+        
+        // Clear "Connecting..." message if it's the last one
+        const output = document.getElementById("messagesContainer");
+        if (output && output.lastElementChild && output.lastElementChild.textContent === "连接服务器中...") {{
+             output.lastElementChild.remove();
+        }}
+        
         addSystemMessage("已连接到服务器 ✓");
         
         // 发送模型配置 setup
@@ -731,6 +787,35 @@ function connect() {{
     
     ws.onmessage = function(event) {{
         const data = JSON.parse(event.data);
+        
+        // [New] Handle Message List Return
+        if (data.type === "members_list") {{
+            if (data.members) {{
+                // Update members list from server
+                // Filter out duplicates or merge
+                data.members.forEach(serverMember => {{
+                    const existing = members.find(m => m.name === serverMember.name);
+                    if (!existing) {{
+                        members.push({{
+                            name: serverMember.name,
+                            isUser: serverMember.isUser || false,
+                            isThinking: false,
+                            avatar: serverMember.avatar || "🤖",
+                            isManager: false,
+                            customPrompt: ""
+                        }});
+                    }}
+                }});
+                renderMemberList();
+                updateMemberCount(members.length);
+            }}
+            if (data.group_name) {{
+                 document.getElementById("groupName").innerText = data.group_name;
+                 document.getElementById("sidebarGroupName").innerText = data.group_name;
+            }}
+            return;
+        }}
+        
         handleMessage(data);
     }};
     
@@ -743,6 +828,7 @@ function connect() {{
     }};
     
     ws.onerror = function(error) {{
+        log("WebSocket Error Detected (Check console for details)", 'error');
         console.error("WebSocket error:", error);
     }};
 }}
@@ -1476,6 +1562,52 @@ function insertEmoji(emoji) {{
 
 // Initialize
 initEmojiPicker();
+
+// --- MISSING handleMessage FUNCTION ---
+function handleMessage(data) {{
+    if (!data) return;
+    
+    switch(data.type) {{
+        case "system":
+            addSystemMessage(data.content, true);
+            break;
+        case "dialogue":
+            // {{type: "dialogue", actor: "Name", content: "..."}}
+            // Determine avatar/isUser from members list
+            // For now assume all dialogues are messages
+            addMessage({{
+                name: data.actor,
+                content: data.content,
+                timestamp: new Date().toLocaleTimeString([], {{hour: '2-digit', minute:'2-digit'}}),
+                is_user: false
+            }});
+            break;
+        case "stage_direction":
+            addSystemMessage("🎬 " + data.content, true);
+            break;
+        case "thinking":
+            // Show thinking status ring
+            const m = members.find(x => x.name === data.actor);
+            if (m) {{
+                 m.isThinking = true;
+                 renderMemberList();
+            }}
+            break;
+        case "history_sync":
+             if (data.messages && Array.isArray(data.messages)) {{
+                 data.messages.forEach(msg => {{
+                     // Convert blackboard struct to msg
+                     addMessage({{
+                         name: msg.speaker,
+                         content: msg.content,
+                         is_user: (msg.speaker === "Gaia" || msg.speaker === "User"), // Approximate
+                         timestamp: msg.timestamp || ""
+                     }});
+                 }});
+             }}
+             break;
+    }}
+}}
 
 function initStageUI() {{
     if (SCENARIO_CONFIG && SCENARIO_CONFIG.stage_type && SCENARIO_CONFIG.stage_type !== "聊天群聊") {{

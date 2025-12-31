@@ -1,18 +1,23 @@
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any, Optional
+from core.state.db_manager import DBManager
 
 class StateManager:
     """
     Centralized management for application state.
     Wraps Streamlit session_state to provide structured access.
     """
+    db = DBManager()
     
     @staticmethod
     def initialize():
         """Ensure all required session state keys exist."""
+        # Load configs from DB if they exist
+        saved_configs = StateManager.db.load_providers()
+        
         defaults = {
-            "llm_configs": [],
+            "llm_configs": saved_configs if saved_configs else [],
             "director_chat_history": [],
             "world_bible": {},
             "current_script": None, # Previous script (for backward compat)
@@ -20,9 +25,15 @@ class StateManager:
             "scenario_theme": "一场发生在封闭空间内的心理博弈",
             "casting_data": [],
             "actors_config": {},
+            
+            # === 新数据结构：角色为中心 ===
+            "actor_personas": {},  # Key: actor_id, Value: {model_id, role, nickname, prompt, memories, ...}
+            
+            # === 旧数据结构：保留以向后兼容 ===
             "nicknames": {},
             "custom_prompts": {},
             "custom_memories": {},
+            
             "current_stage_type": "聊天群聊",
             "prompt_version": 0,
             "director_phase": "idle" # idle, reviewing, finalized

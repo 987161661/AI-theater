@@ -3,37 +3,76 @@ import streamlit as st
 def inject_custom_css():
     st.markdown("""
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap');
+        
+        * { font-family: 'Outfit', sans-serif; }
+
+        /* Glassmorphism Effect */
+        .stApp {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #1a1a2e 100%);
+            color: #ffffff;
+        }
+
+        .glass-card {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 20px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.4);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .glass-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
         .stButton>button {
-            border-radius: 8px;
+            border-radius: 14px;
+            background: linear-gradient(135deg, #e94560 0%, #c62828 100%);
+            color: white;
+            border: none;
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
-        .provider-card {
-            border: 1px solid #e0e0e0;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            background-color: #ffffff;
+        .stButton>button:hover {
+            transform: scale(1.02);
+            box-shadow: 0 8px 20px rgba(233, 69, 96, 0.5);
         }
-        .model-row {
-            padding: 10px;
-            border-bottom: 1px solid #f0f0f0;
-        }
+
         .status-badge-success {
-            background-color: #d4edda;
-            color: #155724;
-            padding: 2px 6px;
-            border-radius: 4px;
+            background: rgba(40, 167, 69, 0.15);
+            color: #4cd137;
+            padding: 6px 12px;
+            border-radius: 24px;
             font-size: 0.8em;
-            border: 1px solid #c3e6cb;
+            border: 1px solid rgba(76, 209, 55, 0.3);
+            font-weight: 600;
+            box-shadow: 0 0 10px rgba(76, 209, 55, 0.2);
         }
-        .status-badge-fail {
-            background-color: #f8d7da;
-            color: #721c24;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.8em;
-            border: 1px solid #f5c6cb;
+
+        /* Message Bubble Animations */
+        @keyframes fadeInSlide {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
         }
-        /* Hide default Streamlit anchor links to make it cleaner */
+        .chat-msg {
+            animation: fadeInSlide 0.5s ease-out forwards;
+        }
+
+        /* Sidebar Styling */
+        section[data-testid="stSidebar"] {
+            background: rgba(15, 52, 96, 0.98) !important;
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(20px);
+        }
+
+        /* Hide default Streamlit anchor links */
         .css-15zrgzn {display: none}
     </style>
     """, unsafe_allow_html=True)

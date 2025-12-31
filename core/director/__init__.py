@@ -25,11 +25,14 @@ class Director:
     def generate_script_with_constraints(self, topic: str, constraints: Dict[str, Any]) -> pd.DataFrame:
         return self._generator.generate(topic, constraints)
 
+    def generate_random_theme(self, genre: str, reality: str) -> str:
+        return self._generator.generate_theme(genre, reality)
+
     def generate_world_bible(self, topic: str, script_df: pd.DataFrame, stage: str) -> Dict[str, str]:
         return self._builder.build(topic, script_df, stage)
 
-    def auto_casting(self, theme: str, actors_list: List[str], stage: str) -> Dict[str, Any]:
-        return self._caster.assign_roles(theme, actors_list, stage)
+    def auto_casting(self, theme: str, actors_list: List[str], stage: str, scenario_df: pd.DataFrame = None, user_deep_participation: bool = False) -> List[Dict[str, Any]]:
+        return self._caster.assign_roles(theme, actors_list, stage, scenario_df, user_deep_participation)
 
     def consult(self, history: List[Dict], current_script: List[Dict]) -> Dict[str, Any]:
         return self._chat.consult(history, current_script)

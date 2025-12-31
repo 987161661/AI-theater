@@ -11,6 +11,7 @@ class PerformanceBlackboard:
     def __init__(self):
         self._facts: List[Dict[str, str]] = [] # List of {fact, timestamp, category}
         self._locked_facts: Set[str] = set()    # Facts that cannot be changed (Canon)
+        self._dialogue_history: List[str] = []  # Ephemeral chat history for context
 
     def add_fact(self, fact: str, category: str = "general"):
         """Adds a new fact to the blackboard."""
@@ -31,6 +32,20 @@ class PerformanceBlackboard:
             lines.append(f"{i}. [{f['category'].upper()}] {f['fact']}")
         return "\n".join(lines)
 
+    def add_dialogue(self, speaker: str, content: str):
+        """Adds a dialogue line to history."""
+        self._dialogue_history.append({"speaker": speaker, "content": content})
+    
+    def get_recent_dialogue(self, limit: int = 5) -> str:
+        """Returns the last N lines of dialogue as text (for display/compatibility)."""
+        recent = self._dialogue_history[-limit:]
+        return "\n".join([f"{msg['speaker']}: {msg['content']}" for msg in recent])
+
+    def get_recent_dialogue_struct(self, limit: int = 5) -> List[Dict[str, str]]:
+        """Returns the last N lines of dialogue as structured objects."""
+        return self._dialogue_history[-limit:]
+
     def clear(self):
         self._facts = []
         self._locked_facts = set()
+        self._dialogue_history = []
