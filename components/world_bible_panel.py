@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import time
 from core.director import Director
 from core.state.manager import state_manager
 
@@ -120,12 +121,32 @@ def render_world_bible_panel(client, model_name):
                 # Dynamic Assignment UI based on Source
                 if "🤖 AI" in selected_source:
                     model_key = f"model_assign_{i}"
-                    all_models = [c["name"] for c in st.session_state.llm_configs]
-                    if not all_models:
-                        st.warning("请先配置服务商")
+                    
+                    # [MODIFIED] Collect all available models across providers
+                    all_models_options = []
+                    for c in st.session_state.llm_configs:
+                        provider_name = c.get("name", "Unknown")
+                        fetched = c.get("fetched_models", [])
+                        if fetched:
+                            for m in fetched:
+                                all_models_options.append(f"{m} ({provider_name})")
+                        else:
+                            # Fallback if no fetched models but a default/manual one exists
+                            m = c.get("model")
+                            if m:
+                                all_models_options.append(f"{m} ({provider_name})")
+                                
+                    if not all_models_options:
+                        st.warning("请先配置服务商并获取模型")
                         assigned_model = None
                     else:
-                        assigned_model = st.selectbox("分配模型", all_models, key=model_key)
+                        # Try to preserve previous selection if valid
+                        prev_sel = role.get("assigned_model")
+                        idx = 0
+                        if prev_sel in all_models_options:
+                            idx = all_models_options.index(prev_sel)
+                            
+                        assigned_model = st.selectbox("分配模型", all_models_options, index=idx, key=model_key)
                     role["assigned_model"] = assigned_model
                     
                 elif "📜 脚本机器人" in selected_source:
@@ -182,6 +203,10 @@ def render_world_bible_panel(client, model_name):
             all_nicknames = [r["nickname"] for r in st.session_state.casting_data]
             
             for i, row in enumerate(st.session_state.casting_data):
+                # Add a small delay between processing each actor to avoid rate limits
+                if i > 0:
+                    time.sleep(1) # Sleep 1s to be polite
+                
                 # 生成唯一角色ID
                 actor_id = f"{row.get('role', 'Actor')}_{i}"
                 

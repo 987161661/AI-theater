@@ -4,6 +4,8 @@ import logging
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
 import streamlit as st
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+import openai
 
 from core.utils.json_parser import JSONParser, CastingModel, PersonaModel
 
@@ -16,6 +18,19 @@ class CastingLogic:
     def __init__(self, client: OpenAI, model_name: str):
         self._client = client
         self._modelName = model_name
+
+    @retry(
+        retry=retry_if_exception_type((openai.RateLimitError, openai.APIConnectionError, openai.APIStatusError)),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(5)
+    )
+    def _query(self, prompt: str) -> str:
+        response = self._client.chat.completions.create(
+            model=self._modelName,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content
 
     def assign_roles(self, theme: str, actors_list: List[str], stage: str, scenario_df: Any = None, user_deep_participation: bool = False) -> List[Dict[str, Any]]:
         """
@@ -95,13 +110,17 @@ class CastingLogic:
                 pass
             
             # Smart fallback based on theme and stage
-            return self._generate_default_roles(theme, stage, user_deep_participation)
+            # REMOVED Fallback to allow error to surface
+            # return self._generate_default_roles(theme, stage, user_deep_participation)
+            return []
             
         except Exception as e:
             error_msg = str(e)
             st.error(f"❌ CastingLogic Error: {error_msg}")
             logger.error(f"Casting Suggestion Error: {error_msg}")
-            return self._generate_default_roles(theme, stage, user_deep_participation)
+            # REMOVED Fallback to allow error to surface
+            # return self._generate_default_roles(theme, stage, user_deep_participation)
+            raise e
 
     def _generate_default_roles(self, theme: str, stage: str, user_deep_participation: bool) -> List[Dict[str, Any]]:
         """Generate intelligent default roles based on theme and stage."""
@@ -243,10 +262,3 @@ class CastingLogic:
                 "text": f"大家好，我是{nickname}。"
             }
 
-    def _query(self, prompt: str) -> str:
-        response = self._client.chat.completions.create(
-            model=self._modelName,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7
-        )
-        return response.choices[0].message.content

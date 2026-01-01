@@ -9,11 +9,15 @@ from components.director_panel import render_director_panel
 from components.world_bible_panel import render_world_bible_panel
 from components.websocket_chat import render_websocket_chat
 from core.director import Director
+from core.utils.server_manager import ensure_backend_running
 
 # --- Initialization ---
 state_manager.initialize()
 
 st.set_page_config(page_title="AI Theater", page_icon="🎭", layout="wide")
+
+# --- Auto-start Backend Check ---
+ensure_backend_running()
 
 # --- Global Config Check ---
 if not state_manager.llm_configs:
@@ -103,28 +107,65 @@ elif st.session_state.active_theater_tab == "🏟️ 舞台表演":
     for aid, p_data in st.session_state.actor_personas.items():
         if p_data.get("source_type") == "AI":
             # Find the config for this model
-            target_model = p_data.get("model_id")
-            # Find matching config from state_manager
-            matching_cfg = next((c for c in state_manager.llm_configs if c.get("name") == target_model or c.get("model") == target_model), None)
+            raw_model_id = p_data.get("model_id", "")
             
+            # Parse "ModelName (ProviderName)" format
+            import re
+            match = re.match(r"(.*) \((.*)\)", raw_model_id)
+            
+            matching_cfg = None
+            specific_model = None
+            
+            if match:
+                specific_model = match.group(1)
+                provider_name = match.group(2)
+                # Find provider by name
+                matching_cfg = next((c for c in state_manager.llm_configs if c.get("name") == provider_name), None)
+            else:
+                # Fallback to legacy behavior (exact match or default)
+                specific_model = raw_model_id
+                matching_cfg = next((c for c in state_manager.llm_configs if c.get("name") == raw_model_id or c.get("model") == raw_model_id), None)
+
             # If not found by exact name, try to use the first available or the one selected in current session
             if not matching_cfg and state_manager.llm_configs:
                  matching_cfg = state_manager.llm_configs[0]
 
             if matching_cfg:
+                # Create a copy to avoid mutating global state, and set the specific model
+                # This ensures the backend uses the exact model selected for this actor
+                cfg_copy = matching_cfg.copy()
+                if specific_model:
+                    cfg_copy["model"] = specific_model
+
                 # Use Nickname as the primary ID for the backend if possible, or keep role name but ensure display is correct.
                 # User wants "AI actor's group nickname to be configured".
                 # If we use nickname here, the backend knows them by nickname.
                 actor_id = p_data.get("nickname") or p_data.get("role_name") or aid
                 actors_payload.append({
                     "name": actor_id, 
-                    "llm_config": matching_cfg, # Pass full check
+                    "llm_config": cfg_copy, # Pass specific config with correct model
                     "system_prompt": p_data.get("system_prompt", ""),
                     "memory": "\n".join(p_data.get("initial_memories", [])) if isinstance(p_data.get("initial_memories"), list) else p_data.get("initial_memories", "")
                 })
 
     # Script Config
-    script_payload = st.session_state.scenario_df.to_dict("records")
+    raw_script = st.session_state.scenario_df.to_dict("records")
+    script_payload = []
+    for item in raw_script:
+        # Map frontend DataFrame columns (Title Case) to Backend Pydantic Model (snake_case)
+        # ScriptEvent(timeline, event, characters, description, location, goal)
+        event_content = item.get("Event", "")
+        # Use first sentence or first 30 chars as title if event is long
+        event_title = event_content.split("。")[0][:30] if event_content else "New Event"
+        
+        script_payload.append({
+            "timeline": item.get("Time", "Unknown Time"),
+            "event": event_title,
+            "description": event_content,
+            "characters": item.get("Characters", ""),
+            "location": item.get("Location", "默认地点"),
+            "goal": item.get("Goal", "")
+        })
     
     # World Bible
     bible_payload = st.session_state.world_bible

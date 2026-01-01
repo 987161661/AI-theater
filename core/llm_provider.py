@@ -22,6 +22,74 @@ class LLMProvider:
         if self.api_key and self.base_url:
             self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
+    def safe_completion(self, messages: List[Dict], model: str = None, temperature: float = 0.7) -> str:
+        """
+        Robust chat completion with retries, similar to the brother project's implementation.
+        Handles Rate Limits, Connection Errors, and invalid messages.
+        """
+        import random
+        from openai import RateLimitError, APIConnectionError, APIError
+
+        target_model = model or self.model_name
+        max_retries = 5
+        backoff = 2
+
+        # 1. Filter invalid messages (Critical Fix for 400 Errors)
+        valid_messages = []
+        for m in messages:
+            content = m.get("content", "")
+            if content and str(content).strip():
+                valid_messages.append(m)
+        
+        if not valid_messages:
+            return "[SYSTEM ERROR: Empty Message Context]"
+
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=target_model,
+                    messages=valid_messages,
+                    temperature=temperature,
+                    max_tokens=1024
+                )
+                return response.choices[0].message.content
+
+            except RateLimitError as e:
+                # 429 Error
+                wait_time = backoff * (2 ** attempt) + random.uniform(0, 1)
+                # Try to parse retry-after header if accessible, or just use exponential backoff
+                print(f"[{target_model}] Rate Limit Hit. Waiting {wait_time:.1f}s...")
+                time.sleep(wait_time)
+            
+            except APIConnectionError as e:
+                # Network Error
+                wait_time = backoff * (2 ** attempt)
+                print(f"[{target_model}] Connection Error: {e}. Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                
+            except APIError as e:
+                # Other API errors (500, 502, etc)
+                print(f"[{target_model}] API Error: {e}")
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(2)
+                
+            except Exception as e:
+                # 400 Error (Bad Request) usually shouldn't be retried unless we fix the payload,
+                # but sometimes it's transient.
+                print(f"[{target_model}] Unexpected Error: {e}")
+                if "400" in str(e) or "invalid" in str(e).lower():
+                    # If it's a 400, it might be the message format. 
+                    # We already filtered empty messages. 
+                    # If it persists, fail fast.
+                    raise e 
+                
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(1)
+
+        raise Exception("Max retries exceeded")
+
     def check_connection(self) -> Dict[str, Any]:
         """
         Tests the connection by sending a minimal request.

@@ -193,23 +193,30 @@ def render_director_panel(client, model_name):
         with c_opt2:
             if st.button("🪄 开始智能选角", use_container_width=True, type="primary"):
                 director = Director(client, model_name)
-                with st.spinner("导演正在审稿并建议人选..."):
-                    # Pass participation preference
-                    suggested_roles = director.auto_casting(
-                        st.session_state.scenario_theme, 
-                        [], # Dynamic roles don't need actor list yet
-                        st.session_state.current_stage_type, 
-                        st.session_state.scenario_df,
-                        deep_participation
-                    )
-                    
-                    # Store suggested roles in state
-                    st.session_state.casting_data = suggested_roles
-                    st.session_state.director_phase = "reviewing"
-                    
-                    # Trigger navigation flag (we'll use this in the main page)
-                    st.session_state.nav_to_casting = True
-                    st.success("选角建议已生成！即将前往分配模块。")
-                    st.rerun()
+                try:
+                    with st.spinner("导演正在审稿并建议人选..."):
+                        # Pass participation preference
+                        suggested_roles = director.auto_casting(
+                            st.session_state.scenario_theme, 
+                            [], # Dynamic roles don't need actor list yet
+                            st.session_state.current_stage_type, 
+                            st.session_state.scenario_df,
+                            deep_participation
+                        )
+                        
+                        if suggested_roles:
+                            # Store suggested roles in state
+                            st.session_state.casting_data = suggested_roles
+                            st.session_state.director_phase = "reviewing"
+                            
+                            # Trigger navigation flag (we'll use this in the main page)
+                            st.session_state.nav_to_casting = True
+                            st.success("选角建议已生成！即将前往分配模块。")
+                            st.rerun()
+                        else:
+                            st.error("未能生成有效的角色建议，请稍后重试。")
+                except Exception as e:
+                    st.error(f"智能选角发生错误: {e}")
+                    # Do not navigate
     else:
         st.info("👈 请先选择舞台并生成或手动添加剧本事件")

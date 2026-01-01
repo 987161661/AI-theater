@@ -45,6 +45,15 @@ class PerformanceBlackboard:
         """Returns the last N lines of dialogue as structured objects."""
         return self._dialogue_history[-limit:]
 
+    def remove_last_dialogue(self, speaker: str) -> bool:
+        """Removes the last dialogue message from the specified speaker."""
+        for i in range(len(self._dialogue_history) - 1, -1, -1):
+            if self._dialogue_history[i]['speaker'] == speaker:
+                removed = self._dialogue_history.pop(i)
+                logger.info(f"Revoked message from {speaker}: {removed['content']}")
+                return True
+        return False
+
     def clear(self):
         self._facts = []
         self._locked_facts = set()

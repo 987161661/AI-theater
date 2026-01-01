@@ -694,28 +694,7 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
         </div>
     </div>
 </div>
-<div id="debugConsole" style="
-    position: fixed; 
-    bottom: 0; 
-    left: 0; 
-    width: 100%; 
-    height: 150px; 
-    background: rgba(0,0,0,0.8); 
-    color: #0f0; 
-    font-family: monospace; 
-    font-size: 12px; 
-    overflow-y: auto; 
-    z-index: 9999; 
-    padding: 10px;
-    box-sizing: border-box;
-    display: block; 
-    border-top: 2px solid #333;
-">
-    <div style="position:sticky; top:0; background:#000; border-bottom:1px solid #333; margin-bottom:5px; font-weight:bold;">
-        Debug Console (Auto-Scrolling)
-    </div>
-    <div id="debugLogs"></div>
-</div>
+
 </div>
 
 <script>
@@ -732,14 +711,15 @@ let members = [
 
 // --- DEBUG UTILS ---
 function log(msg, type='info') {{
-    const logs = document.getElementById("debugLogs");
-    if (!logs) return;
-    const entry = document.createElement("div");
-    entry.style.color = type === 'error' ? '#ff6b6b' : (type === 'success' ? '#69db7c' : '#0f0');
-    entry.textContent = `[${{new Date().toLocaleTimeString()}}] ${{msg}}`;
-    logs.appendChild(entry);
-    document.getElementById("debugConsole").scrollTop = document.getElementById("debugConsole").scrollHeight;
-    console.log(msg);
+    // Console logging only, visual debug console removed
+    const timestamp = new Date().toLocaleTimeString();
+    if (type === 'error') {{
+        console.error(`[${{timestamp}}] ${{msg}}`);
+    }} else if (type === 'success') {{
+        console.log(`%c[${{timestamp}}] ${{msg}}`, 'color: #69db7c');
+    }} else {{
+        console.log(`[${{timestamp}}] ${{msg}}`);
+    }}
 }}
 
 window.onerror = function(msg, url, lineNo, columnNo, error) {{
@@ -762,6 +742,10 @@ function connect() {{
         log("WebSocket Connected!", 'success');
         isConnected = true;
         updateStatus();
+
+        // Update preview text
+        const lastPreview = document.getElementById("lastPreview");
+        if (lastPreview) lastPreview.innerText = "已连接";
         
         // Clear "Connecting..." message if it's the last one
         const output = document.getElementById("messagesContainer");
@@ -820,10 +804,11 @@ function connect() {{
     }};
     
     ws.onclose = function() {{
+        log("WebSocket Closed", 'error');
         isConnected = false;
         isRunning = false;
         updateStatus();
-        addSystemMessage("连接已断开，3秒后重连...");
+        addSystemMessage("连接已断开，正在尝试重连...");
         setTimeout(connect, 3000);
     }};
     
@@ -832,6 +817,9 @@ function connect() {{
         console.error("WebSocket error:", error);
     }};
 }}
+
+// 页面加载完成后自动连接
+setTimeout(connect, 500);
 
 function startSimulation() {{
     if (!isConnected) return;
@@ -945,8 +933,35 @@ function handleMessage(data) {{
             updatePreview(data.message);
             updateMemberFromMsg(data.message);
             break;
+        case "dialogue":
+            // Handle new server protocol
+            const msg = {{
+                name: data.actor,
+                nickname: data.nickname,
+                content: data.content,
+                is_user: data.is_user,
+                avatar: data.avatar,
+                timestamp: new Date().toLocaleTimeString([], {{hour: '2-digit', minute:'2-digit'}})
+            }};
+            addMessage(msg);
+            updatePreview(msg);
+            updateMemberFromMsg(msg);
+            break;
         case "pat":
             addSystemMessage(`${{data.from_user}} 拍了拍 ${{data.to_user}}`, true);
+            break;
+        case "revoke":
+            // Remove the last message bubble sent by data.name
+            const allRows = document.querySelectorAll('.wc-msg-row');
+            for (let i = allRows.length - 1; i >= 0; i--) {{
+                const row = allRows[i];
+                const avatarDiv = row.querySelector('.wc-msg-avatar');
+                if (avatarDiv && avatarDiv.getAttribute('onclick') && avatarDiv.getAttribute('onclick').includes(`'${{data.name}}'`)) {{
+                    row.remove();
+                    break;
+                }}
+            }}
+            addSystemMessage(`${{data.name}} 撤回了一条消息`, true);
             break;
         case "recall":
             removeMessageByTimestamp(data.msg_id);
@@ -1464,7 +1479,7 @@ function clearChat() {{
 }}
 
 // 回车发送
-document.getElementById("inputBox").addEventListener("keydown", function(e) {{
+document.getElementById("inputBox").onkeydown = function(e) {{
     if (e.key === "Enter" && !e.shiftKey) {{
         e.preventDefault();
         sendMessage();
@@ -1475,7 +1490,7 @@ document.getElementById("inputBox").addEventListener("keydown", function(e) {{
              typingTimeout = null;
         }}
     }}
-}});
+}};
 
 // User Typing Detection
 let typingTimeout = null;
@@ -1563,8 +1578,8 @@ function insertEmoji(emoji) {{
 // Initialize
 initEmojiPicker();
 
-// --- MISSING handleMessage FUNCTION ---
-function handleMessage(data) {{
+// --- DUPLICATE FUNCTION DISABLED ---
+function unused_handleMessage(data) {{
     if (!data) return;
     
     switch(data.type) {{

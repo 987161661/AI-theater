@@ -1,10 +1,14 @@
 import streamlit as st
+from core.utils.server_manager import ensure_backend_running
 
 st.set_page_config(
     page_title="IA ITheater Entry",
     page_icon="🎭",
     layout="wide"
 )
+
+# --- Auto-start Backend Logic ---
+ensure_backend_running()
 
 st.title("🎭 Welcome to AI Theater")
 
