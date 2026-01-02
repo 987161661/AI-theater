@@ -9,7 +9,7 @@ import streamlit.components.v1 as components
 import json
 
 
-def render_websocket_chat(room_id: str = "consciousness_lab", ws_url: str = "ws://localhost:8001", member_count: int = 3, model_configs: list = None, scenario_config: dict = None, group_name: str = "语言模型内部意识讨论群", is_stage_view: bool = False):
+def render_websocket_chat(room_id: str = "consciousness_lab", ws_url: str = "ws://localhost:8000", member_count: int = 3, model_configs: list = None, scenario_config: dict = None, group_name: str = "语言模型内部意识讨论群", is_stage_view: bool = False):
     """
     渲染 WebSocket 实时群聊界面 - 使用与传统模式相同的微信精确 UI
     
@@ -174,6 +174,37 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
     padding: 0 12px;
     flex-shrink: 0;
 }}
+
+.debug-btn {{
+    background: transparent;
+    border: 1px solid #555;
+    color: #aaa;
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    margin-left: 10px;
+}}
+.debug-btn:hover {{ background: #444; color: #fff; }}
+.debug-btn.active {{ border-color: #07c160; color: #07c160; }}
+
+.debug-console {{
+    position: absolute;
+    top: 28px; right: 0; bottom: 0;
+    width: 300px;
+    background: rgba(0, 0, 0, 0.85);
+    color: #0f0;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    padding: 10px;
+    overflow-y: auto;
+    z-index: 200;
+    display: none;
+    border-left: 1px solid #444;
+}}
+.debug-entry {{ margin-bottom: 4px; border-bottom: 1px solid #333; padding-bottom: 2px; word-wrap: break-word; }}
+.debug-time {{ color: #888; margin-right: 5px; }}
+
 .traffic-lights {{ display: flex; gap: 8px; }}
 .traffic-light {{ width: 12px; height: 12px; border-radius: 50%; }}
 .tl-close {{ background: #ff5f57; }}
@@ -593,7 +624,17 @@ input:checked + .slider:before {{ transform: translateX(14px); }}
             <div class="traffic-light tl-maximize"></div>
         </div>
         <div class="title-text">微信</div>
+        <button class="debug-btn" id="btn-debug" onclick="toggleDebug()">🐞 Debug</button>
         <div class="status-dot" id="statusDot"></div>
+    </div>
+
+    <!-- Debug Console -->
+    <div id="debug-console" class="debug-console">
+        <div style="color:#fff; border-bottom:1px solid #666; padding-bottom:5px; margin-bottom:5px;">
+            <strong>System Debug Log</strong>
+            <span style="float:right; cursor:pointer;" onclick="toggleDebug()">×</span>
+        </div>
+        <div id="debug-logs"></div>
     </div>
     <div class="wc-body">
         <input type="file" id="avatarInput" style="display:none" accept="image/png,image/jpeg,image/gif" onchange="handleAvatarUpload(this)">
@@ -728,7 +769,54 @@ window.onerror = function(msg, url, lineNo, columnNo, error) {{
 }};
 // ------------------- 
 
-function connect() {{
+let debugMode = false;
+
+    function toggleDebug() {{
+        debugMode = !debugMode;
+        var consoleEl = document.getElementById('debug-console');
+        var btnEl = document.getElementById('btn-debug');
+        
+        if (debugMode) {{
+            consoleEl.style.display = 'block';
+            btnEl.classList.add('active');
+        }} else {{
+            consoleEl.style.display = 'none';
+            btnEl.classList.remove('active');
+        }}
+        
+        // Notify server
+        if (ws && ws.readyState === WebSocket.OPEN) {{
+            var msg = {{
+                type: 'toggle_debug',
+                enabled: debugMode
+            }};
+            ws.send(JSON.stringify(msg));
+        }}
+    }}
+
+    function addDebugLog(content, time) {{
+        console.log("Adding debug log:", content, time);
+        const logsEl = document.getElementById('debug-logs');
+        if (!logsEl) {{
+            console.error("Debug logs container not found!");
+            return;
+        }}
+        const entry = document.createElement('div');
+        entry.className = 'debug-entry';
+        entry.innerHTML = '<span class="debug-time">[' + (time || new Date().toLocaleTimeString()) + ']</span> ' + content;
+        logsEl.appendChild(entry);
+        logsEl.scrollTop = logsEl.scrollHeight;
+        
+        // Limit logs
+        while (logsEl.children.length > 200) {{
+            logsEl.removeChild(logsEl.firstChild);
+        }}
+    }}
+
+    function connect() {{
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {{
+        return;
+    }}
     log("Attempting to connect to: " + WS_URL);
     renderMemberList(); 
     try {{
@@ -743,6 +831,14 @@ function connect() {{
         isConnected = true;
         updateStatus();
 
+        // [Fix] Re-send debug toggle if enabled
+        if (debugMode) {{
+             ws.send(JSON.stringify({{
+                type: 'toggle_debug',
+                enabled: true
+            }}));
+        }}
+        
         // Update preview text
         const lastPreview = document.getElementById("lastPreview");
         if (lastPreview) lastPreview.innerText = "已连接";
@@ -757,7 +853,7 @@ function connect() {{
         
         // 发送模型配置 setup
         if (MODEL_CONFIGS && MODEL_CONFIGS.length > 0) {{
-            ws.send(JSON.stringify({{
+            this.send(JSON.stringify({{
                 type: "setup",
                 models: MODEL_CONFIGS,
                 scenario: SCENARIO_CONFIG
@@ -765,8 +861,8 @@ function connect() {{
         }}
         
         // 获取初始成员和历史
-        ws.send(JSON.stringify({{ type: "get_members" }}));
-        ws.send(JSON.stringify({{ type: "get_history" }}));
+        this.send(JSON.stringify({{ type: "get_members" }}));
+        this.send(JSON.stringify({{ type: "get_history" }}));
     }};
     
     ws.onmessage = function(event) {{
@@ -800,6 +896,11 @@ function connect() {{
             return;
         }}
         
+        if (data.type === 'debug_log') {{
+            addDebugLog(data.content, data.timestamp);
+            return;
+        }}
+
         handleMessage(data);
     }};
     

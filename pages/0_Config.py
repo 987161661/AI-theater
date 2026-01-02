@@ -3,11 +3,12 @@ import pandas as pd
 import requests
 import concurrent.futures
 import time
+
+st.set_page_config(page_title="Configuration", page_icon="⚙️", layout="wide")
+
 from core.llm_provider import LLMProvider, LocalProviderScanner
 from core.ui_utils import inject_custom_css, get_provider_logo_url, get_model_tags, render_status_badge
 from core.state.manager import state_manager
-
-st.set_page_config(page_title="Configuration", page_icon="⚙️", layout="wide")
 inject_custom_css()
 
 st.title("⚙️ 剧场后台配置 (Studio Settings)")
@@ -123,8 +124,23 @@ with tab_openrouter:
     OPENROUTER_MODELS_API = "https://openrouter.ai/api/v1/models"
 
     def fetch_openrouter_models():
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        session = requests.Session()
+        retry = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
         try:
-            response = requests.get(OPENROUTER_MODELS_API, timeout=10)
+            # Increased timeout to 20s for better stability
+            response = session.get(OPENROUTER_MODELS_API, timeout=20) 
             response.raise_for_status()
             data = response.json()
             return data.get("data", [])
@@ -321,8 +337,7 @@ with tab_openrouter:
         selected_tags = st.multiselect(
             "🏷️ 按标签筛选 (Filter by Tags)", 
             options=sorted_tags,
-            placeholder="选择标签以过滤模型池 (未显示的模型将不加入模型池)...",
-            label_visibility="collapsed" 
+            placeholder="选择标签以过滤模型池...",
         )
 
     with col3:
@@ -348,6 +363,7 @@ with tab_openrouter:
         # 1. Tag Filter (AND Logic)
         if selected_tags:
             def has_all_tags(row_tags_str, selected):
+                if not row_tags_str: return False
                 row_tags = row_tags_str.split()
                 # Check if row_tags contains ALL selected tags (Subset check)
                 return set(selected).issubset(set(row_tags))

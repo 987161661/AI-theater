@@ -3,18 +3,19 @@ import pandas as pd
 import requests
 import time
 import json
+
+# --- Initialization (Must be first) ---
+st.set_page_config(page_title="AI Theater", page_icon="🎭", layout="wide")
+
 from core.state.manager import state_manager
 from core.llm_provider import LLMProvider
-from components.director_panel import render_director_panel
+from components.director_panel import render_director_panel, handle_theme_generation
 from components.world_bible_panel import render_world_bible_panel
 from components.websocket_chat import render_websocket_chat
 from core.director import Director
 from core.utils.server_manager import ensure_backend_running
 
-# --- Initialization ---
 state_manager.initialize()
-
-st.set_page_config(page_title="AI Theater", page_icon="🎭", layout="wide")
 
 # --- Auto-start Backend Check ---
 ensure_backend_running()
@@ -86,6 +87,7 @@ client = LLMProvider(
 model = selected_model_option["model_id"]
 
 if st.session_state.active_theater_tab == "🎬 AI 导演":
+    handle_theme_generation(client, model)
     render_director_panel(client, model)
 elif st.session_state.active_theater_tab == "🎭 角色分配":
     render_world_bible_panel(client, model)
@@ -99,7 +101,7 @@ elif st.session_state.active_theater_tab == "🏟️ 舞台表演":
          st.stop()
 
     # 1. Prepare Backend Init Data
-    api_url = "http://localhost:8001"
+    api_url = "http://localhost:8000"
     
     # Actors Config
     actors_payload = []
@@ -234,7 +236,7 @@ elif st.session_state.active_theater_tab == "🏟️ 舞台表演":
     st.divider()
     render_websocket_chat(
         room_id="ai_theater_live",
-        ws_url="ws://localhost:8001",
+        ws_url="ws://localhost:8000",
         member_count=len(actors_payload) + 1, # +1 for user
         model_configs=frontend_model_configs,
         scenario_config={
@@ -245,3 +247,91 @@ elif st.session_state.active_theater_tab == "🏟️ 舞台表演":
         group_name=bible_payload.get("group_name", "AI Theater"),
         is_stage_view=True
     )
+
+    # --- God Mode Controller ---
+    st.divider()
+    st.subheader("🌩️ 上帝操控台 (God Mode)")
+
+    # Initialize session state for pause
+    if "god_mode_paused" not in st.session_state:
+        st.session_state.god_mode_paused = False
+
+    col_gm1, col_gm2 = st.columns([1, 4])
+    with col_gm1:
+        # Pause/Resume Toggle
+        is_paused = st.session_state.god_mode_paused
+        if is_paused:
+            if st.button("▶️ 恢复 (Resume)", type="primary", use_container_width=True):
+                try:
+                    requests.post(f"{api_url}/control", params={"action": "resume"})
+                    st.session_state.god_mode_paused = False
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"连接失败: {e}")
+        else:
+            if st.button("⏸️ 暂停 (Pause)", type="secondary", use_container_width=True):
+                try:
+                    requests.post(f"{api_url}/control", params={"action": "pause"})
+                    st.session_state.god_mode_paused = True
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"连接失败: {e}")
+
+    if is_paused:
+        st.info("⏸️ 舞台已冻结。现在可以进行上帝干预。")
+        
+        col_left, col_right = st.columns([2, 1])
+        
+        with col_left:
+            st.markdown("### ⚡ 突发事件 (Sudden Events)")
+            st.caption("在下方输入框中填写事件，点击⚡按钮发送给对应角色。")
+            
+            # 1. Global Event
+            with st.expander("🌍 全局事件 (发送给所有人)", expanded=True):
+                c1, c2 = st.columns([4, 1])
+                global_evt = c1.text_input("全局事件描述", key="god_global_input", label_visibility="collapsed", placeholder="例如：忽然地震了")
+                if c2.button("⚡ 发送", key="god_global_btn"):
+                    if global_evt:
+                        try:
+                            requests.post(f"{api_url}/god_mode/inject", json={"content": global_evt})
+                            st.toast("⚡ 全局神谕已降临！")
+                        except Exception as e:
+                            st.error(f"失败: {e}")
+
+            # 2. Per Actor Events
+            st.markdown("#### 👤 角色专属事件")
+            for actor in actors_payload:
+                a_name = actor["name"]
+                c1, c2, c3 = st.columns([1, 3, 1])
+                c1.markdown(f"**{a_name}**")
+                val = c2.text_input(f"input_{a_name}", key=f"god_input_{a_name}", label_visibility="collapsed", placeholder=f"给 {a_name} 的突发状况...")
+                if c3.button("⚡", key=f"god_btn_{a_name}"):
+                    if val:
+                        try:
+                            requests.post(f"{api_url}/god_mode/inject", json={"actor_name": a_name, "content": val})
+                            st.toast(f"⚡ 神谕已发送给 {a_name}！")
+                        except Exception as e:
+                            st.error(f"失败: {e}")
+
+        with col_right:
+            st.markdown("### ⏳ 时空穿梭")
+            st.caption("调整时间滑块（0-24小时）")
+            
+            # Fetch current status to get context if needed, but for now just a slider
+            time_val = st.slider("时间 (小时)", 0, 23, 12, format="%d:00")
+            
+            # Optional: Allow minute adjustment
+            # minute_val = st.slider("分钟", 0, 59, 0)
+            
+            if st.button("⏳ 确认穿越"):
+                new_time = f"{time_val:02d}:00"
+                try:
+                    requests.post(f"{api_url}/god_mode/time_travel", json={"new_time": new_time})
+                    st.toast(f"⏳ 时间已变更为 {new_time}")
+                except Exception as e:
+                    st.error(f"失败: {e}")
+            
+            st.info("⚠️ 注意：除非是超现实剧本，否则请勿将时间倒流到当前时间点之前。")
+
+    else:
+        st.caption("⏸️ 点击暂停按钮以启用上帝干预功能（突发事件、时空穿梭）。")

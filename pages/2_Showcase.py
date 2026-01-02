@@ -2,9 +2,10 @@ import streamlit as st
 import asyncio
 import websockets
 import json
-from components.chat_box import render_chat_box
 
 st.set_page_config(page_title="AI Theater Showcase", page_icon="🎭", layout="wide", initial_sidebar_state="collapsed")
+
+from components.chat_box import render_chat_box
 
 # Custom CSS to hide controls
 st.markdown("""

@@ -1,6 +1,11 @@
 import asyncio
 import logging
+import os
 import re  # Moved to top level
+
+# Disable CrewAI Telemetry
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
+
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +18,10 @@ from core.state.performance_blackboard import PerformanceBlackboard
 from core.actor.memory_bank import MemoryBank
 from core.stage.stage_rules import StageRules
 from core.utils.prompt_templates import get_stage_directives, get_willingness_protocol
-from core.director.script_generator import ScriptGenerator
+from core.director.crew_script_generator import CrewScriptGenerator as ScriptGenerator
+from core.director.crew_post_scene import CrewPostSceneAnalyst
+from core.director.god_director import GodDirector, GodEventAction
+from core.actor.crew_actor import CrewActor
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -49,9 +57,9 @@ class ActorConfig(BaseModel):
 class ScriptEvent(BaseModel):
     timeline: str
     event: str
-    characters: str
-    description: str
-    location: str
+    characters: Optional[str] = "所有人"
+    description: Optional[str] = ""
+    location: Optional[str] = "默认地点"
     goal: str = ""
     max_turns: int = 30  # Increased to allow Cold Field to be the primary terminator
 
@@ -61,6 +69,39 @@ class InitRequest(BaseModel):
     world_bible: Optional[Dict[str, str]] = {}
     stage_type: Optional[str] = "聊天群聊"
 
+class GenerateThemeRequest(BaseModel):
+    genre: str
+    reality: str
+    stage: str = "聊天群聊"
+    count: int = 1
+    llm_config: Dict[str, Any]
+
+@app.post("/generate_theme")
+async def generate_theme(request: GenerateThemeRequest):
+    try:
+        logger.info(f"Received Theme Generation Request. Genre: {request.genre}, Stage: {request.stage}, Count: {request.count}")
+        # Reconstruct LLM Client
+        llm_provider = LLMProvider(
+            api_key=request.llm_config.get("api_key"),
+            base_url=request.llm_config.get("base_url"),
+            model_name=request.llm_config.get("model")
+        )
+        
+        # Instantiate Generator
+        generator = ScriptGenerator(llm_provider.client, llm_provider.model_name)
+        
+        # Generate in a thread pool to avoid blocking the event loop
+        loop = asyncio.get_event_loop()
+        themes = await loop.run_in_executor(
+            None,
+            lambda: generator.generate_themes(request.genre, request.reality, request.stage, request.count)
+        )
+        
+        return {"themes": themes}
+    except Exception as e:
+        logger.error(f"Theme generation failed: {e}")
+        return JSONResponse(status_code=500, content={"detail": str(e)})
+
 # --- State Management (God Mode Enabled) ---
 class StageManager:
     def __init__(self):
@@ -68,6 +109,7 @@ class StageManager:
         self.script: List[ScriptEvent] = []
         self.actors: Dict[str, ActorConfig] = {}
         self.llm_clients: Dict[str, LLMProvider] = {}
+        self.crew_actors: Dict[str, CrewActor] = {}
         
         # State & Persistence
         self.db = DBManager()
@@ -82,6 +124,9 @@ class StageManager:
         
         self._loopTask = None
         self._eventQueue = asyncio.Queue()
+        self.active_scene_chat_history: List[Dict[str, Any]] = []
+        self.debug_mode = False
+        self.is_fresh_start = False # Track if performance just started to preserve context
 
     async def connect(self, ws: WebSocket):
         await ws.accept()
@@ -112,6 +157,9 @@ class StageManager:
             m = cfg.llm_config
             self.llm_clients[name] = LLMProvider(m["api_key"], m["base_url"], m["model"])
             
+            # Initialize CrewActor
+            self.crew_actors[name] = CrewActor(name, cfg.system_prompt, m)
+            
             # Setup structured MemoryBank
             initial_memories = [cfg.memory] if cfg.memory else []
             self.actor_memories[name] = MemoryBank(name, initial_memories)
@@ -123,6 +171,15 @@ class StageManager:
         self.is_playing = False
         self.blackboard.clear()
         logger.info(f"Initialized performance {self.performance_id} with {len(self.script)} events.")
+
+    async def broadcast_debug(self, message: str):
+        """Broadcast a debug message if debug mode is on."""
+        if self.debug_mode:
+            await self.broadcast({
+                "type": "debug_log",
+                "content": message,
+                "timestamp": __import__("time").strftime("%H:%M:%S")
+            })
 
     async def start(self):
         if not self.script:
@@ -136,6 +193,7 @@ class StageManager:
             return
 
         self.is_playing = True
+        self.is_fresh_start = True
         if not self._loopTask or self._loopTask.done():
             self._loopTask = asyncio.create_task(self._main_loop())
 
@@ -147,12 +205,101 @@ class StageManager:
             self.current_index = index
             logger.info(f"Jumped to event {index}")
 
+    def _get_god_director(self):
+        """Helper to get a GodDirector instance using the best available LLM."""
+        # Priority: 'Director' -> GPT-4 -> Any
+        client = self.llm_clients.get("Director")
+        if not client:
+            for c in self.llm_clients.values():
+                if "gpt-4" in c.model_name.lower():
+                    client = c
+                    break
+        if not client:
+            client = next(iter(self.llm_clients.values()), None)
+            
+        if client:
+            return GodDirector(client.client, client.model_name)
+        return None
+
+    async def _process_god_injection(self, content: str, target_actor: Optional[str] = None):
+        """Internal handler for processing God Mode requests via CrewAI."""
+        god_director = self._get_god_director()
+        if not god_director:
+            # Fallback: simple injection if no LLM
+            await self._eventQueue.put({"content": content, "target": target_actor} if target_actor else content)
+            return
+
+        # Build Context
+        # We need current scene info. 
+        # Since this runs async, we grab a snapshot of current state.
+        active_actors = list(self.actors.keys()) # Rough approx, or check active_actors logic
+        # Ideally we want the active actors of the CURRENT event, but we can just pass all for now or check current script event
+        current_event_data = "No active event"
+        if 0 <= self.current_index < len(self.script):
+             current_event_data = self.script[self.current_index].event
+        
+        context = {
+            "active_actors": active_actors,
+            "current_event": current_event_data,
+            "recent_history": self.blackboard.get_recent_dialogue_struct(3)
+        }
+
+        # Run GodDirector in thread
+        await self.broadcast({"type": "stage_direction", "content": "⚡ 上帝正在编织命运..."})
+        loop = asyncio.get_event_loop()
+        action = await loop.run_in_executor(
+            None,
+            lambda: god_director.process_intervention(content, target_actor, context)
+        )
+        
+        # Put the structured action into the queue
+        await self._eventQueue.put(action)
+
     async def inject_event(self, content: str):
         """God Mode: Inject a sudden event into the live session."""
-        await self._eventQueue.put(content)
+        await self._process_god_injection(content, None)
+
+    async def inject_targeted_event(self, actor_name: str, content: str):
+        """God Mode: Inject a specific event for an actor."""
+        await self._process_god_injection(content, actor_name)
+
+    async def time_travel(self, new_time: str):
+        """God Mode: Adjust the timeline."""
+        # Update current event's timeline if possible, or just broadcast
+        if 0 <= self.current_index < len(self.script):
+            self.script[self.current_index].timeline = new_time
+        
+        msg = f"⏳ [时空穿梭] 时间已变更为: {new_time}"
         if self.performance_id:
-            self.db.log_event(self.performance_id, "SYSTEM", "stage_direction", f"⚡ [突发指令]: {content}")
-        await self.broadcast({"type": "stage_direction", "content": f"⚡ [突发指令]: {content}"})
+            self.db.log_event(self.performance_id, "SYSTEM", "stage_direction", msg)
+        await self.broadcast({"type": "stage_direction", "content": msg})
+
+    async def _apply_god_action(self, action: GodEventAction):
+        """Apply the structured God Mode action."""
+        # 1. Global Announcement
+        if action.global_announcement:
+             msg = f"⚡ [神谕]: {action.global_announcement}"
+             # Add to everyone's memory
+             for mb in self.actor_memories.values():
+                 mb.add(msg)
+             if self.performance_id:
+                 self.db.log_event(self.performance_id, "GOD", "stage_direction", msg)
+             await self.broadcast({"type": "stage_direction", "content": msg})
+
+        # 2. Target Instructions
+        if action.target_instructions:
+             for name, instr in action.target_instructions.items():
+                 if name in self.actor_memories:
+                     # High priority instruction
+                     self.actor_memories[name].add(f"【神之指令 (立即执行)】: {instr}")
+                     await self.broadcast_debug(f"⚡ Command -> {name}: {instr}")
+
+        # 3. Memory Updates
+        if action.memory_updates:
+             for name, mem in action.memory_updates.items():
+                 if name in self.actor_memories:
+                     self.actor_memories[name].add(f"【植入记忆】: {mem}")
+                     logger.info(f"Injected memory for {name}: {mem}")
 
     async def _main_loop(self):
         logger.info("Main Loop Started")
@@ -165,7 +312,10 @@ class StageManager:
             # Check for Injected Events first
             while not self._eventQueue.empty():
                 ext_event = await self._eventQueue.get()
-                await self._handle_event_step(ext_event, is_injected=True)
+                if isinstance(ext_event, GodEventAction):
+                    await self._apply_god_action(ext_event)
+                else:
+                    await self._handle_event_step(ext_event, is_injected=True)
 
             # Normal script event
             current_event = self.script[self.current_index]
@@ -201,13 +351,29 @@ class StageManager:
         
         logger.info(f"Director Adaptation triggered. Adapting event {next_event_idx}...")
         await self.broadcast({"type": "stage_direction", "content": "🤔 导演正在根据刚才的剧情调整剧本..."})
+        await self.broadcast_debug(f"🎬 Director is adapting event {next_event_idx}...")
 
         try:
             # We need an LLM client for the Director. Ideally pass it in or use a default.
             # For now, pick the first available actor's client as a proxy or use a dedicated one.
             # In a real system, Director has its own config. 
-            # We'll try to find a client named "Director" or just use the first one.
-            director_client = next(iter(self.llm_clients.values()), None)
+            # Strategy: Look for an actor named "Director" or "Host", otherwise pick the one with the strongest model (e.g. gpt-4)
+            director_client = None
+            
+            # Priority 1: Explicit "Director" actor
+            if "Director" in self.llm_clients:
+                director_client = self.llm_clients["Director"]
+            else:
+                # Priority 2: Find any client using gpt-4
+                for name, client in self.llm_clients.items():
+                    if "gpt-4" in client.model_name.lower():
+                        director_client = client
+                        break
+                
+                # Priority 3: Fallback to first available
+                if not director_client:
+                    director_client = next(iter(self.llm_clients.values()), None)
+
             if not director_client:
                 logger.error("No LLM client available for Director.")
                 return
@@ -251,6 +417,7 @@ class StageManager:
 
                 logger.info(f"Event {next_event_idx} adapted: {original_next_event.goal}")
                 await self.broadcast({"type": "stage_direction", "content": f"💡 导演已更新下一幕: {original_next_event.event}"})
+                await self.broadcast_debug(f"✅ Director updated event {next_event_idx}")
                 
                 # Persist change?
                 if self.performance_id:
@@ -260,13 +427,31 @@ class StageManager:
         except Exception as e:
             logger.error(f"Director Adaptation failed: {e}")
             await self.broadcast({"type": "stage_direction", "content": "⚠️ 导演思考卡顿，继续按原计划进行。"})
+            await self.broadcast_debug(f"❌ Director Error: {e}")
 
 
     async def _handle_event_step(self, event_data: Any, is_injected: bool = False):
         logger.info(f"Handling event step: {event_data.event if not is_injected else 'Injected'}")
+        await self.broadcast_debug(f"🎬 Scene Started: {event_data.event}")
+        
+        # Track scene chat history for post-analysis
+        # Link local variable to class member so user messages are seen
+        if self.is_fresh_start:
+             # Preserve existing messages (e.g. user trigger message) for the first scene
+             self.is_fresh_start = False
+             logger.info(f"Fresh start: Preserving {len(self.active_scene_chat_history)} messages.")
+        else:
+             self.active_scene_chat_history = []
+             
+        scene_chat_history = self.active_scene_chat_history
+        
         if is_injected:
-            desc = event_data
-            chars = list(self.actors.keys()) # Everyone reacts to God
+            if isinstance(event_data, dict) and "target" in event_data:
+                desc = f"【突发事件】: {event_data['content']}"
+                chars = [event_data['target']] if event_data['target'] in self.actors else []
+            else:
+                desc = event_data
+                chars = list(self.actors.keys()) # Everyone reacts to God
             loc = "Current"
         else:
             desc = event_data.description
@@ -305,255 +490,227 @@ class StageManager:
                 return
 
             logger.info(f"Active Actors for event: {active_actors}")
+            await self.broadcast_debug(f"👥 Active Actors: {active_actors}")
             
             last_speaker_idx = -1
             consecutive_silence_count = 0
-            
-            # --- Anti-Monopoly & Anti-Loop State ---
             prev_speaker_name = None
             consecutive_speech_count = 0
 
-            while current_turn < max_turns and not scene_ended and self.is_playing:
-                # 1. Select Speaker (Round Robin for now, can be smarter)
+            while current_turn < max_turns and not scene_ended:
+                # --- God Mode: Pause Check ---
+                while not self.is_playing:
+                    await asyncio.sleep(0.5)
+
+                # --- God Mode: Check for Injected Events (Mid-scene) ---
+                while not self._eventQueue.empty():
+                    ext_event = await self._eventQueue.get()
+                    
+                    if isinstance(ext_event, GodEventAction):
+                        await self._apply_god_action(ext_event)
+                    elif isinstance(ext_event, dict) and "target" in ext_event:
+                        # Targeted Event
+                        target_actor = ext_event["target"]
+                        content = ext_event["content"]
+                        if target_actor in self.actor_memories:
+                            # Inject into memory immediately so it's picked up in next context
+                            self.actor_memories[target_actor].add(f"【突发事件】: {content}")
+                            logger.info(f"Injected event for {target_actor}: {content}")
+                            await self.broadcast_debug(f"⚡ Injected to {target_actor}: {content}")
+                    else:
+                        # Global Event (String)
+                        msg = f"⚡ [突发指令]: {ext_event}"
+                        # Add to everyone's memory
+                        for mb in self.actor_memories.values():
+                            mb.add(msg)
+                        await self.broadcast({"type": "stage_direction", "content": msg})
+
+                # 1. Select Speaker (Round Robin)
                 last_speaker_idx = (last_speaker_idx + 1) % len(active_actors)
                 char_name = active_actors[last_speaker_idx]
                 
-                # [Fix] Anti-Monopoly Check: Prevent same actor from speaking more than twice in a row
+                # Anti-Monopoly Check
                 if char_name == prev_speaker_name and consecutive_speech_count >= 2:
                     logger.info(f"Actor {char_name} skipped (Anti-Monopoly rule).")
                     await asyncio.sleep(0.1)
                     continue
 
                 actor = self.actors[char_name]
-                client = self.llm_clients[char_name]
+                crew_actor = self.crew_actors[char_name]
                 m_bank = self.actor_memories[char_name]
 
                 logger.info(f"Preparing turn {current_turn} for {char_name}")
 
                 # 2. Build Context
                 blackboard_facts = self.blackboard.get_all_facts()
-                structured_memory = m_bank.get_full_memory_prompt()
                 stage_rules = StageRules(self.stage_type)
-                stage_instructions = stage_rules.get_stage_instructions(char_name, "; ".join(self.actors.keys()), self.world_bible.get("group_name", "Stage"))
-                willingness_protocol = get_willingness_protocol()
-
-                full_system = (
-                    f"{stage_instructions}\n\n"
-                    f"{willingness_protocol}\n\n"
-                    f"### [你的核心人设]\n{actor.system_prompt}\n\n"
-                    f"### [当前剧情目标]\n**Goal**: {desc} (收敛目标: {event_data.goal})\n"
-                    f"**Progress**: Turn {current_turn + 1}/{max_turns}\n\n"
-                    f"### [全局公共事实 (全场可见)]\n{blackboard_facts}\n\n"
-                    f"### [个人记忆与动机 (私有)]\n{structured_memory}"
-                )
                 
-                # Construct messages with Role-Based History
-                recent_struct = self.blackboard.get_recent_dialogue_struct(10)
+                context_memories = m_bank.get_recent(5)
                 
-                raw_messages = []
-                # 1. System Prompt
-                raw_messages.append({"role": "system", "content": full_system})
-                
-                # 2. History
-                for msg in recent_struct:
-                    if msg['speaker'] == char_name:
-                         raw_messages.append({"role": "assistant", "content": msg['content']})
-                    else:
-                         raw_messages.append({"role": "user", "content": f"[{msg['speaker']}]: {msg['content']}"})
-                
-                # 3. Current Prompt
-                user_msg = f"Event: {desc}\nLocation: {loc}\nRespond as {char_name}:"
-                raw_messages.append({"role": "user", "content": user_msg})
-
-                # --- Normalize Messages for API (System -> User -> Assistant -> User ...) ---
-                messages = []
-                if raw_messages and raw_messages[0]['role'] == 'system':
-                    messages.append(raw_messages.pop(0))
-                
-                # Ensure first message is User (if strictly required, insert dummy if Assistant is first)
-                if raw_messages and raw_messages[0]['role'] == 'assistant':
-                    messages.append({"role": "user", "content": "(Context: Previous self-dialogue)"})
-                
-                for msg in raw_messages:
-                    if not messages:
-                        messages.append(msg)
-                        continue
-                    
-                    last_role = messages[-1]['role']
-                    current_role = msg['role']
-                    
-                    if last_role == current_role:
-                        # Merge content
-                        messages[-1]['content'] += f"\n\n{msg['content']}"
-                    else:
-                        messages.append(msg)
-
-                # Final check: Ensure alternation (should be correct now due to merging)
-                # Log for debug
-                import json
-                logger.info(f"Constructed messages ({len(messages)}): {json.dumps(messages, ensure_ascii=False)[:500]}...")
-
-                await self.broadcast({"type": "thinking", "actor": char_name})
-                
-                # Default to silence in case of error
-                is_silence = True
-
-                # Default to silence in case of error
-                is_silence = True
+                context = {
+                    "event": event_data.event,
+                    "description": desc,
+                    "goal": event_data.goal,
+                    "memories": context_memories,
+                    "chat_history": scene_chat_history[-5:],
+                    "stage_directives": stage_rules.get_stage_instructions(char_name, ", ".join(active_actors)),
+                    "blackboard_facts": blackboard_facts
+                }
 
                 try:
-                    logger.info(f"Calling LLM for {char_name}...")
-                    loop = asyncio.get_event_loop()
+                    # Execute CrewAI Agent
+                    await self.broadcast({"type": "thinking", "actor": char_name})
+                    await self.broadcast_debug(f"🤔 {char_name} is thinking...")
+                    act_data = await asyncio.to_thread(crew_actor.perform, context)
                     
-                    # Use safe_completion for robust handling
-                    content = await loop.run_in_executor(None, lambda: client.safe_completion(
-                        messages=messages,
-                        model=client.model_name
-                    ))
+                    content = act_data.get("content", "...")
+                    action = act_data.get("action", "")
+                    finished = act_data.get("is_finished", False)
+                    willingness = act_data.get("willingness", 5)
+                    thought = act_data.get("thought", "")
                     
-                    logger.info(f"LLM Response for {char_name}: {content[:50]}...")
+                    # Enhanced Debug: Show thought process or error details
+                    await self.broadcast_debug(f"🗣️ {char_name} Raw: W={willingness} | {content[:30]}...")
+                    if thought:
+                        await self.broadcast_debug(f"💭 Thought: {thought[:100]}...")
 
-                    raw_reply = content.strip()
-                    
-                    # --- PARSE WILLINGNESS PROTOCOL ---
-                    import re
-                    thought = ""
-                    willingness = 10
-                    content = raw_reply
+                    # --- Willingness Logic ---
+                    is_pass = (
+                        content.strip() == "[PASS]" or 
+                        (isinstance(willingness, int) and willingness < 3 and "[PASS]" in content) or
+                        (not content.strip() and not action.strip())
+                    )
 
-                    t_match = re.search(r"\[THOUGHT\]:(.*?)(\[|$)", raw_reply, re.DOTALL)
-                    w_match = re.search(r"\[WILLINGNESS\]:\s*(\d+)", raw_reply)
-                    c_match = re.search(r"\[CONTENT\]:(.*)", raw_reply, re.DOTALL)
-                    
-                    if t_match: thought = t_match.group(1).strip()
-                    if w_match: willingness = int(w_match.group(1))
-                    if c_match: content = c_match.group(1).strip()
-                    else:
-                         # Fallback
-                         if "[THOUGHT]" in raw_reply:
-                             pass
-                         else:
-                             content = raw_reply
-
-                    # Clean [SCENE_END]
-                    if "[SCENE_END]" in content:
-                        scene_ended = True
-                        content = content.replace("[SCENE_END]", "").strip()
-
-                    # --- PARSE SPECIAL INTERACTIONS (Pat, Quote, Revoke) ---
-                    # 1. Pat (拍一拍)
-                    pat_match = re.search(r"\[(?:拍一拍|Pat)\s*@?([^\]]+)\]", content)
-                    if pat_match:
-                        target = pat_match.group(1).strip()
-                        # Broadcast Pat Event
-                        pat_msg = f"{char_name} 拍了拍 {target}"
-                        await self.broadcast({"type": "system", "content": pat_msg})
-                        if self.performance_id:
-                            self.db.log_event(self.performance_id, char_name, "interaction", pat_msg)
-                        # Remove tag from content
-                        content = content.replace(pat_match.group(0), "").strip()
-
-                    # 2. Revoke (撤回)
-                    if "[撤回]" in content or "[REVOKE]" in content:
-                        # Logic: Remove last message from this user
-                        self.blackboard.remove_last_dialogue(char_name)
-                        
-                        # Broadcast revoke signal
-                        await self.broadcast({"type": "revoke", "name": char_name})
-                        if self.performance_id:
-                            self.db.log_event(self.performance_id, char_name, "system", f"{char_name} 撤回了一条消息")
-                        
-                        # Stop processing this turn as 'dialogue' if content is just [Revoke]
-                        if len(content.replace("[撤回]", "").replace("[REVOKE]", "").strip()) < 5:
-                            logger.info(f"Actor {char_name} triggered REVOKE.")
-                            content = "" # Clear content so it doesn't get sent as dialogue
-
-                    # 3. Quote (引用)
-                    quote_data = None
-                    quote_match = re.search(r"\[(?:引用|Quote)\s*@?([^:：]+?)\s*[:：]\s*([^\]]+)\]", content)
-                    if quote_match:
-                        q_user = quote_match.group(1).strip()
-                        q_text = quote_match.group(2).strip()
-                        quote_data = {"user": q_user, "text": q_text}
-                        # Remove tag from content to avoid duplicate display
-                        content = content.replace(quote_match.group(0), "").strip()
-
-                    logger.info(f"Actor: {char_name} | W: {willingness} | T: {thought[:50]}...")
-
-                    # --- DECISION: SPEAK OR PASS ---
-                    is_silence = False
-                    
-                    # [Fix] Duplicate Content Check
-                    is_duplicate = False
-                    if len(content) > 5:
-                        recent_msgs_check = self.blackboard.get_recent_dialogue_struct(5)
-                        for r_msg in recent_msgs_check:
-                            if r_msg['content'].strip() == content.strip() or content.strip() in r_msg['content']:
-                                is_duplicate = True
-                                break
-                    
-                    if is_duplicate:
-                        logger.warning(f"Actor {char_name} filtered due to duplicate content.")
-                        is_silence = True
-                        # Penalize willingness implicitly by treating as silence
-                    elif "[PASS]" in content or (willingness < 4 and len(content) < 5):
-                        is_silence = True
+                    if is_pass:
+                        logger.info(f"Actor {char_name} passed (W: {willingness}).")
+                        await self.broadcast_debug(f"⏭️ {char_name} Passed (Willingness: {willingness})")
                         consecutive_silence_count += 1
-                        logger.info(f"Actor {char_name} decided to PASS. (Silence Count: {consecutive_silence_count})")
+                        
+                        # "Cold Field" Logic: If everyone passes (or willingness is low)
+                        # We use len(active_actors) as the threshold. If everyone has passed once consecutively, scene ends.
+                        if consecutive_silence_count >= len(active_actors):
+                            logger.info("❄️ Cold Field detected (Everyone passed). Ending scene.")
+                            await self.broadcast({"type": "stage_direction", "content": "❄️ 话题逐渐冷场..."})
+                            scene_ended = True
+                        continue
                     else:
                         consecutive_silence_count = 0
-                        
-                        # Update Anti-Monopoly State
-                        if char_name == prev_speaker_name:
-                            consecutive_speech_count += 1
+                    
+                    # Update Anti-Monopoly
+                    if char_name == prev_speaker_name:
+                        consecutive_speech_count += 1
+                    else:
+                        prev_speaker_name = char_name
+                        consecutive_speech_count = 1
+
+                    # --- Special Interactions (Pat, Revoke) Parsing ---
+                    if "[撤回]" in content or "[REVOKE]" in content or "[撤回]" in action:
+                         self.blackboard.remove_last_dialogue(char_name)
+                         await self.broadcast({"type": "revoke", "name": char_name})
+                         if self.performance_id:
+                            self.db.log_event(self.performance_id, char_name, "system", f"{char_name} 撤回了一条消息")
+                         content = "" # Don't speak
+                         action = ""  # Clear action to prevent dialogue broadcast
+
+                    if content or action:
+                        if content and action:
+                            full_msg = f"{content} ({action})"
+                        elif action:
+                            full_msg = f"({action})"
                         else:
-                            prev_speaker_name = char_name
-                            consecutive_speech_count = 1
-                        
-                        m_bank.add_short_term(f"You said: {content}")
-                        self.blackboard.add_dialogue(char_name, content)
+                            full_msg = content
 
                         if self.performance_id:
-                            self.db.log_event(self.performance_id, char_name, "dialogue", content)
-                            self.db.save_actor_state(self.performance_id, char_name, actor.model_dump(), m_bank._secrets)
+                            self.db.log_event(self.performance_id, char_name, "dialogue", full_msg)
                         
-                        await self.broadcast({"type": "dialogue", "actor": char_name, "content": content, "quote": quote_data})
-
-                    # --- CHECK COLD FIELD TERMINATION ---
-                    if consecutive_silence_count >= len(active_actors):
+                        msg_obj = {
+                            "type": "dialogue",
+                            "name": char_name,
+                            "content": content,
+                            "action": action,
+                            "avatar": f"https://api.dicebear.com/7.x/avataaars/svg?seed={char_name}",
+                            "thought": thought,
+                            "willingness": willingness
+                        }
+                        await self.broadcast(msg_obj)
+                        
+                        # Store raw content and action separately for cleaner context
+                        scene_chat_history.append({
+                            "role": "user", 
+                            "name": char_name, 
+                            "content": content,
+                            "action": action
+                        })
+                        self.blackboard.add_dialogue(char_name, full_msg)
+                        m_bank.add(f"在 {event_data.event} 中说: {full_msg}")
+                    
+                    if finished:
                         scene_ended = True
-                        reason = "场面冷清 (Cold Field)"
-                        logger.info(f"Scene Terminated: {reason}")
-                        await self.broadcast({"type": "stage_direction", "content": f"🍂 {reason}，当前场景自然结束。"})
-
+                        logger.info(f"Actor {char_name} signalled end of scene.")
+                        
                 except Exception as e:
-                    logger.error(f"Actor {char_name} fail: {e}", exc_info=True)
-                    await self.broadcast({"type": "system", "content": f"⚠️ {char_name} 思考出错: {str(e)}"})
-                    consecutive_silence_count += 1
+                    logger.error(f"Actor error: {e}")
+                    await self.broadcast_debug(f"❌ Actor Error: {e}")
                 
                 current_turn += 1
-                if not is_silence:
-                     await asyncio.sleep(2)
-                else:
-                     await asyncio.sleep(0.5)
+                await asyncio.sleep(1) # Pacing
             
-            # --- [NEW] End of Loop: Memory Consolidation ---
-            if scene_ended or current_turn >= max_turns:
-                 summary = f"Scene '{event_data.event}' ended. Goal: {event_data.goal}. Outcome: Converged."
-                 # Summary could be generated by LLM, for now simple string.
-                 self.blackboard.add_fact(summary, "story_summary")
-                 
-                 # Here is where we invoke the Director for Adaptation (Next Step)
-                 await self._invoke_director_adaptation(event_data, summary)
+            # --- [NEW] Post-Scene Analysis & Memory Consolidation ---
+            if not is_injected and scene_chat_history:
+                await self.broadcast({"type": "stage_direction", "content": "🕵️ 剧场书记官正在记录本幕摘要..."})
+                try:
+                    # 1. Generate Scene Summary (Objective)
+                    analyst_client = next(iter(self.llm_clients.values()), None)
+                    if analyst_client:
+                         analyst = CrewPostSceneAnalyst(analyst_client.client, analyst_client.model_name)
+                         
+                         context = {
+                             "theme": self.world_bible.get("theme", "General"),
+                             "current_event": event_data.event
+                         }
+                         
+                         loop = asyncio.get_event_loop()
+                         analysis_result = await loop.run_in_executor(
+                             None,
+                             lambda: analyst.analyze(scene_chat_history, context)
+                         )
+                         
+                         summary = analysis_result.get("summary", "")
+                         new_facts = analysis_result.get("fact_updates", {}).get("new_facts", [])
+                         
+                         if summary:
+                             self.blackboard.add_fact(f"Scene Summary: {summary}", "history")
+                             if self.performance_id:
+                                 self.db.log_event(self.performance_id, "SYSTEM", "summary", f"【本幕总结】{summary}")
+                                 await self.broadcast({"type": "stage_direction", "content": f"📜 本幕总结: {summary}"})
+                         
+                         # 2. Memory Consolidation for Each Actor
+                         # Ideally run in parallel, but for stability sequential here
+                         for name, m_bank in self.actor_memories.items():
+                            # Simple consolidation: Add the scene summary to their memory
+                            m_bank.add_long_term(f"In scene '{event_data.event}', I remember: {summary}")
+                            # In a full version, we would ask each actor to reflect personally.
+                             
+                         # 3. Director Adapts Next Scene (The "Rise and Fall" Logic)
+                         if summary:
+                             await self._invoke_director_adaptation(event_data, summary)
+                             
+                except Exception as e:
+                    logger.error(f"Post-scene analysis failed: {e}")
 
-            # Break outer loop (loop over chars) as we handled the event in the while loop
-            pass
+            
+            # Legacy loop removed
+
 
     async def _handle_ws_message(self, ws: WebSocket, msg: str):
         import json
         try:
             data = json.loads(msg)
             msg_type = data.get("type")
+
+            # Verbose debug for all incoming messages if debug mode is on
+            if self.debug_mode and msg_type != "heartbeat":
+                 await self.broadcast_debug(f"📥 WS Recv: {msg_type}")
             
             if msg_type == "get_members":
                 # Return current actors + User
@@ -578,7 +735,7 @@ class StageManager:
                 # Send recent blackboard history
                 history = self.blackboard.get_recent_dialogue_struct(50)
                 await ws.send_json({
-                    "type": "history_sync",
+                    "type": "history",
                     "messages": history
                 })
                 
@@ -599,10 +756,25 @@ class StageManager:
                     # Persist?
                     pass
 
+            elif msg_type == "toggle_debug":
+                if "enabled" in data:
+                    self.debug_mode = data["enabled"]
+                else:
+                    self.debug_mode = not self.debug_mode
+                
+                state = "ON" if self.debug_mode else "OFF"
+                logger.info(f"Debug Mode toggled {state}")
+                await self.broadcast_debug(f"🐞 Debug Mode {state}")
+                # Confirm to frontend
+                await self.broadcast({"type": "debug_status", "enabled": self.debug_mode})
+
             elif msg_type == "user_message":
                 # Handle User Input
                 user_name = data.get("name", "Gaia")
                 content = data.get("content", "")
+                
+                await self.broadcast_debug(f"📨 Received User Message: {content[:50]}")
+                
                 if content:
                     # 1. Add to Blackboard
                     self.blackboard.add_dialogue(user_name, content)
@@ -618,7 +790,15 @@ class StageManager:
                         "content": content,
                         "is_user": True,
                         "nickname": user_name,
-                        "avatar": "https://api.dicebear.com/7.x/micah/svg?seed=Gaia" # Default or from user config
+                        "avatar": f"https://api.dicebear.com/7.x/micah/svg?seed={user_name}" # Default or from user config
+                    })
+
+                    # 3.1 Add to active scene history so actors can see it!
+                    self.active_scene_chat_history.append({
+                        "role": "user",
+                        "name": user_name,
+                        "content": content,
+                        "action": ""
                     })
                     
                     # 4. Auto-start if not playing
@@ -727,5 +907,26 @@ async def api_add_fact(fact: str, category: str = "general"):
     await manager.broadcast({"type": "system", "content": f"📌 [全局事实更新]: {fact}"})
     return {"status": "ok"}
 
+# --- God Mode Endpoints ---
+class InjectRequest(BaseModel):
+    actor_name: Optional[str] = None
+    content: str
+
+class TimeTravelRequest(BaseModel):
+    new_time: str
+
+@app.post("/god_mode/inject")
+async def god_inject(req: InjectRequest):
+    if req.actor_name:
+        await manager.inject_targeted_event(req.actor_name, req.content)
+    else:
+        await manager.inject_event(req.content)
+    return {"status": "ok"}
+
+@app.post("/god_mode/time_travel")
+async def god_time_travel(req: TimeTravelRequest):
+    await manager.time_travel(req.new_time)
+    return {"status": "ok"}
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

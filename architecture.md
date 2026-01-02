@@ -2,9 +2,9 @@
 
 ## 1. 系统概览 (System Overview)
 
-**AI Theater** 是一个基于多智能体协作 (Multi-Agent Collaboration) 的沉浸式交互演艺平台。其核心理念是将 LLM 拟人化为“演员”，在一个由“导演”定义的动态“舞台”上进行实时表演。
+**AI Theater** 是一个基于 **CrewAI 多智能体协作框架 (Multi-Agent Collaboration)** 的沉浸式交互演艺平台。其核心理念是将 LLM 拟人化为“演员”，在一个由“导演团队”定义的动态“舞台”上进行实时表演。
 
-系统采用 **前后端分离** 的架构，通过 WebSocket 实现高频实时交互，s并将“戏剧创作” (Director Phase) 与“舞台表演” (Stage Phase) 解耦，实现了从剧本生成到自动化演出的完整闭环。
+系统采用 **前后端分离** 的架构，通过 WebSocket 实现高频实时交互，并将“戏剧创作” (Director Phase) 与“舞台表演” (Stage Phase) 解耦，实现了从剧本生成到自动化演出的完整闭环。
 
 ### 核心特性
 - **动态导演循环 (Dynamic Director Loop)**: 每一幕结束后，导演会根据上一幕的剧情走向自动调整接下来的剧本，实现真正的“即兴戏剧”。
@@ -19,14 +19,27 @@
 
 ### 2.1 导演系统 (The Director System)
 **路径**: `core/director/`
-导演是整个系统的“大脑”，由多个专门的子智能体组成，通过 `Facade Pattern` 统一对外暴露接口。
+导演是整个系统的“大脑”，现已全面升级为 **CrewAI Agent Teams**。通过 `Facade Pattern` 统一对外暴露接口，底层由多个专业的 Crew 协同工作。
 
-*   **`director/__init__.py` (Director Facade)**: 统一入口，协调下属模块。
-*   **`script_generator.py`**: 剧本生成器。负责生成分幕剧本 (DataFrame)，包含时间线、事件、地点和目标。支持根据前文摘要进行 **动态追更 (Script Adaptation)**。
-*   **`casting_logic.py`**: 选角导演。根据剧本需求，从演员池中匹配合适人选，或“捏造”新演员（生成人设）。
-*   **`world_builder.py`**: 世界构建者。生成“世界观手册” (World Bible)，定义特定的物理规则、社会常识或背景故事。
-*   **`critic_agent.py`**: 剧本医生（实验性）。用于对生成的剧本进行质量评估和反思修正。
-*   **`director_chat.py`**: 咨询助手。允许用户通过自然语言与导演对话，微调设定。
+*   **`director/__init__.py` (Director Facade)**: 统一入口，将请求路由至对应的 CrewAI 实现。
+*   **`crew_script_generator.py` (Script Crew)**: 剧本创作团队。
+    *   `Screenwriter`: 负责撰写初稿。
+    *   `Editor`: 负责格式校验与逻辑润色。
+    *   `Live Director`: 负责演出时的动态剧本调整。
+*   **`crew_casting.py` (Casting Crew)**: 选角团队。
+    *   `Casting Director`: 分析剧本需求，推荐角色。
+    *   `Persona Psychologist`: 生成深度的角色心理侧写与 System Prompt。
+    *   `Automation Specialist`: 配置自动化机器人的触发规则。
+*   **`crew_world_builder.py` (World Crew)**: 世界构建团队。
+    *   `World Architect`: 生成严谨的“世界观手册” (World Bible)。
+*   **`crew_critic.py` (Critic Crew)**: 剧评团队。
+    *   `Drama Critic`: 对剧本大纲或演出效果进行专业点评。
+*   **`crew_post_scene.py` (Analysis Crew)**: 演出后分析团队。
+    *   `Theater Recorder`: 客观记录事实。
+    *   `Relationship Psychologist`: 分析角色关系变化。
+    *   `Narrative Lead`: 生成幕后总结与后续建议。
+
+*(Legacy Modules: `script_generator.py`, `casting_logic.py`, `world_builder.py`, `critic_agent.py`, `director_chat.py` 均已保留但不再使用)*
 
 ### 2.2 舞台系统 (The Stage System)
 **路径**: `core/stage/` & `chat_server.py`
@@ -34,21 +47,25 @@
 
 *   **`chat_server.py` (StageManager)**: 核心后端引擎。
     *   **事件循环 (Event Loop)**: 维护全局时钟，按序推进剧本事件。
-    *   **WebSocket Server**: 负责与前端建立实时连接，广播 `dialogue` (对话), `stage_direction` (舞台指示), `system` (系统消息)。
-    *   **Director Adaptation Trigger**: 监听场景结束信号 (`[SCENE_END]`)，触发导演对下一幕的重写。
-*   **`stage_rules.py`**: 舞台规则策略。定义不同模式下的特殊指令（如：是否允许 OOC，旁白风格，最大发言长度）。
-*   **`stage_types.py`**: 强类型的舞台枚举定义 (e.g., `CHAT_GROUP`, `TRPG`, `COURT`)。
+    *   **WebSocket Server**: 负责与前端建立实时连接。
+    *   **Post-Scene Integration**: 每幕结束后自动调用 `CrewPostSceneAnalyst` 进行总结与反馈。
+    *   **Director Adaptation Trigger**: 监听场景结束信号，触发 `Live Director` 对下一幕的重写。
+*   **`stage_rules.py`**: 舞台规则策略。
+*   **`stage_types.py`**: 强类型的舞台枚举定义。
 
 ### 2.3 演员系统 (The Actor System)
 **路径**: `core/actor/`
-演员是运行在 LLM 之上的拟人化实体。
+演员是运行在 LLM 之上的拟人化实体，现已升级为独立的 CrewAI Agent。
 
-*   **`persona_factory.py`**: 人设工厂。负责生成结构化的 System Prompt（包含性格关键词、说话风格、核心动机）。
+*   **`crew_actor.py` (CrewActor)**: 演员 Agent。
+    *   每个角色都是一个独立的 CrewAI Agent。
+    *   拥有持久化的 `Goal` (真实扮演) 和 `Backstory` (System Prompt)。
+    *   通过 `perform()` 方法接收包含记忆、历史、舞台指示的 `Task`，并输出结构化台词。
+*   **`persona_factory.py`**: (辅助) 人设生成工厂。
 *   **`memory_bank.py`**: 记忆库。
-    *   **Private Memory (Secret)**: 演员初始的背景设定（只读）。
-    *   **Short-term Memory**: 演出过程中的对话历史（运行时累积）。
-    *   **Consolidation**: (规划中) 周期性将短期记忆总结为长期记忆。
-*   **`base_actor.py`**: 演员基类，定义了统一的 `act()` 接口。
+    *   **Private Memory (Secret)**: 演员初始的背景设定。
+    *   **Short-term Memory**: 演出过程中的对话历史。
+*   **`base_actor.py`**: (Legacy) 旧版演员基类。
 
 ### 2.4 状态与存储 (State & Storage)
 **路径**: `core/state/`
@@ -114,16 +131,22 @@ f:\AI theater\
 ├── requirements.txt            # [Config] Python 依赖列表
 ├── core/                       # [Core] 核心业务逻辑
 │   ├── actor/                  # -> 演员子系统
-│   │   ├── base_actor.py       # 演员基类接口
+│   │   ├── crew_actor.py       # [New] CrewAI 演员 Agent
+│   │   ├── base_actor.py       # [Legacy] 演员基类接口
 │   │   ├── memory_bank.py      # 记忆管理 (短期/私有记忆)
 │   │   └── persona_factory.py  # 人设生成工厂 (Prompt Engineering)
 │   ├── director/               # -> 导演子系统 (Facade)
-│   │   ├── __init__.py         # 导演入口 (Director Class)
-│   │   ├── script_generator.py # 剧本/剧情生成与动态适配
-│   │   ├── casting_logic.py    # 自动选角与角色分配
-│   │   ├── world_builder.py    # 世界观构建 (World Bible)
-│   │   ├── director_chat.py    # 导演咨询对话逻辑
-│   │   └── critic_agent.py     # (Alpha) 剧本审查与优化
+│   │   ├── __init__.py         # 导演入口 (Director Facade)
+│   │   ├── crew_script_generator.py # [New] 剧本创作 Crew
+│   │   ├── crew_casting.py     # [New] 选角 Crew
+│   │   ├── crew_world_builder.py # [New] 世界观 Crew
+│   │   ├── crew_post_scene.py  # [New] 演出后分析 Crew
+│   │   ├── crew_critic.py      # [New] 剧评 Crew
+│   │   ├── script_generator.py # [Legacy] 剧本生成
+│   │   ├── casting_logic.py    # [Legacy] 选角逻辑
+│   │   ├── world_builder.py    # [Legacy] 世界构建
+│   │   ├── director_chat.py    # [Legacy] 导演对话
+│   │   └── critic_agent.py     # [Legacy] 剧本审查
 │   ├── stage/                  # -> 舞台子系统
 │   │   ├── stage_rules.py      # 舞台规则逻辑 (Prompt注入/行为约束)
 │   │   └── stage_types.py      # 舞台类型枚举 (Enum)
@@ -163,6 +186,8 @@ f:\AI theater\
 
 ## 5. 技术栈 (Tech Stack)
 
+*   **Framework**: **CrewAI** (Multi-Agent Orchestration) - 核心智能体编排框架。
+*   **LLM Gateway**: **LiteLLM** (via CrewAI) - 统一多模型接口。
 *   **Frontend**: Streamlit (Python UI Framework) - 负责界面渲染与指令下发。
 *   **Backend**: FastAPI (Async Web Server) - 承载 WebSocket 服务与核心循环。
 *   **Concurrency**: Python `asyncio` - 处理多智能体并发思考与实时消息推送。

@@ -110,18 +110,20 @@ class ScriptGenerator:
             df.at[0, "Selected"] = True
         return df
 
-    def generate_theme(self, genre: str, reality: str) -> str:
+    def generate_theme(self, genre: str, reality: str, stage: str = "聊天群聊") -> str:
         """
-        Generates a creative one-sentence script theme based on genre and reality.
+        Generates a creative one-sentence script theme based on genre, reality, and stage.
         """
         prompt = (
             f"请作为一个金牌编剧，根据以下设定，构思一个极具创意和张力的【剧本主题】（一句话）。\n"
             f"【流派】: {genre}\n"
-            f"【世界观现实度】: {reality}\n\n"
+            f"【世界观现实度】: {reality}\n"
+            f"【剧情呈现形式(舞台)】: {stage}\n\n"
             "要求：\n"
             "1. 只输出一句话，包含核心冲突。不要包含任何解释或开场白。\n"
             "2. 语言要凝练、抓人、有画面感。\n"
-            "3. 主题要具体（例如：‘深海潜艇中的密室逃脱’ 而不是 ‘海底的冒险’）。"
+            "3. 主题要具体（例如：‘深海潜艇中的密室逃脱’ 而不是 ‘海底的冒险’）。\n"
+            "4. 主题必须适配当前的【剧情呈现形式】（例如如果是‘跑团桌’，主题可以是‘克苏鲁的呼唤模组’；如果是‘辩论赛’，主题可以是‘一场关于AI伦理的生死辩论’）。"
         )
         response = self._query(prompt)
         # Simple cleanup to remove quotes if LLM adds them

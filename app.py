@@ -1,11 +1,17 @@
 import streamlit as st
-from core.utils.server_manager import ensure_backend_running
+import os
 
+# --- Page Config MUST be the first Streamlit command ---
 st.set_page_config(
     page_title="IA ITheater Entry",
     page_icon="🎭",
     layout="wide"
 )
+
+from core.utils.server_manager import ensure_backend_running
+
+# Disable CrewAI Telemetry to prevent timeouts
+os.environ["CREWAI_TELEMETRY_OPT_OUT"] = "true"
 
 # --- Auto-start Backend Logic ---
 ensure_backend_running()

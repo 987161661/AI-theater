@@ -54,3 +54,4 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
                 pass
                 
     return None
+
